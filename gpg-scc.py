@@ -2,7 +2,10 @@
 
 import os
 import random
+import argparse
+import itertools
 import subprocess
+
 
 homedir = os.getcwd() + '/gpg-home'
 keyserver = 'hkp://keys.fedoraproject.org'
@@ -27,44 +30,57 @@ fields = {
     'cfg': 'Configuration data [*]',
 }
 
+
 def list_sigs():
     output = subprocess.check_output(
         ('gpg', '--homedir', homedir, '--keyserver', keyserver,
-         '--batch', '--list-sigs', '--with-colons'),
-        universal_newlines=True)
+         '--batch', '--list-sigs', '--with-colons'))
     pubkeys = []
     cur_pubkey = None
     cur_uid = None
     for line in output.splitlines():
-        parts = line.split(':')
+        parts = line.split(b':')
         if not line or not parts:
-            pass
-        elif parts[0] not in fields:
-            raise ValueError("Unknown line kind %r" % (parts[0],))
-        elif parts[0] == 'pub':
-            key_id = parts[4]
+            continue
+        record = parts[0].decode()
+        key_id = parts[4].decode()
+        uid_hash = parts[7].decode()
+        if record in ('uid', 'sig'):
+            user_id = parts[9]
+            try:
+                user_id = user_id.decode('utf8')
+            except UnicodeDecodeError:
+                user_id = user_id.decode('latin1')
+        if record not in fields:
+            raise ValueError("Unknown line kind %r" % (record,))
+        elif record == 'pub':
             cur_pubkey = {
-                'key_id': parts[4],
+                'key_id': key_id,
                 'uids': [],
+                'sigs': [],
             }
             pubkeys.append(cur_pubkey)
             cur_uid = None
-        elif parts[0] == 'uid':
+        elif record == 'uid':
             cur_uid = {
-                'id': parts[7],
-                'name': parts[9],
+                'id': uid_hash,
+                'name': user_id,
                 'sigs': []
             }
             cur_pubkey['uids'].append(cur_uid)
-        elif parts[0] == 'sig':
-            key_id = parts[4]
-            name = parts[9]
-            if name == '[User ID not found]':
-                name = None
-            cur_uid['sigs'].append({
-                'key_id': key_id,
-                'name': name,
-            })
+        elif record == 'sig':
+            if user_id == '[User ID not found]':
+                user_id = None
+            if cur_uid is None:
+                cur_pubkey['sigs'].append({
+                    'key_id': key_id,
+                    'name': user_id,
+                })
+            else:
+                cur_uid['sigs'].append({
+                    'key_id': key_id,
+                    'name': user_id,
+                })
     print("We know of %d public keys" % len(pubkeys))
     return pubkeys
 
@@ -76,7 +92,7 @@ def recv_keys(key_ids):
          '--batch', '--recv-keys',) + tuple(key_ids))
 
 
-def get_unknown(pubkeys):
+def get_unknown(pubkeys, source=None):
     unknown = set()
     for pubkey in pubkeys:
         for uid in pubkey['uids']:
@@ -91,7 +107,7 @@ def find_pubkey(pubkeys, key_id):
     result = []
     for pubkey in pubkeys:
         x = pubkey['key_id']
-        if x[:len(key_id)].upper() == key_id[:len(x)].upper():
+        if x[-len(key_id):].upper() == key_id[-len(x):].upper():
             result.append(pubkey)
     if len(result) == 0:
         return None
@@ -101,15 +117,29 @@ def find_pubkey(pubkeys, key_id):
         raise ValueError("%r is not a unique public key" % (key_id,))
 
 
-def get_sig_graph(pubkeys):
-    edge_lists = {}
+def get_strong_set(pubkeys, root):
+    root = root['key_id']
+    edges = set()
     for pubkey in pubkeys:
-        edge_list = set()
-        edge_lists[pubkey['key_id']] = edge_list
         for uid in pubkey['uids']:
             for sig in uid['sigs']:
-                edge_list.add(sig['key_id'])
-    return edge_lists
+                edges.add((pubkey['key_id'], sig['key_id']))
+    strong_edges = edges & set((v, u) for u, v in edges)
+    edge_lists = {
+        u: set(v for u_, v in group)
+        for u, group in itertools.groupby(
+            sorted(strong_edges), key=lambda x: x[0])
+    }
+    strong_set = set([root])
+    frontier = edge_lists[root] - strong_set
+    distance = 0
+    while frontier:
+        next_frontier = set.union(*[edge_lists[u] for u in frontier])
+        distance += 1
+        strong_set |= frontier
+        frontier = next_frontier - strong_set
+        print("dist=%d n=%d" % (distance, len(strong_set)))
+    return [p for p in pubkeys if p['key_id'] in strong_set]
 
 
 def main():
@@ -119,16 +149,25 @@ def main():
 
     if not os.path.exists(homedir):
         os.mkdir(homedir)
+        os.chmod(homedir, 0o700)
 
     pubkeys = list_sigs()
     root = find_pubkey(pubkeys, args.root)
     if root is None:
         recv_keys([args.root])
         pubkeys = list_sigs()
+        root = find_pubkey(pubkeys, args.root)
 
-    unknown = get_unknown(pubkeys)
-    while unknown and len(pubkeys) < 100:
-        recv_keys(random.sample(unknown, min(len(unknown), 48)))
+    strong_set = get_strong_set(pubkeys, root)
+    unknown = get_unknown(strong_set)
+    while unknown and len(strong_set) < 400:
+        print("The strong set has size %d" % len(strong_set))
+        recv_keys(random.sample(unknown, min(len(unknown), 16)))
         pubkeys = list_sigs()
-        graph = get_sig_graph(pubkeys)
-        unknown = get_unknown(pubkeys)
+        strong_set = get_strong_set(pubkeys, root)
+        unknown = get_unknown(strong_set)
+    print("The strong set has size %d" % len(strong_set))
+
+
+if __name__ == "__main__":
+    main()
