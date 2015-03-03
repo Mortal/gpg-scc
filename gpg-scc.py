@@ -30,11 +30,16 @@ fields = {
     'cfg': 'Configuration data [*]',
 }
 
+ignore_keys = set([
+    '9710B89BCA57AD7C',  # PGP Global Directory Verification Key
+])
+
 
 def list_sigs():
     output = subprocess.check_output(
         ('gpg', '--homedir', homedir, '--keyserver', keyserver,
-         '--batch', '--list-sigs', '--with-colons'))
+         '--enable-progress-filter', '--batch', '--list-sigs',
+         '--with-colons'))
     pubkeys = []
     cur_pubkey = None
     cur_uid = None
@@ -59,7 +64,8 @@ def list_sigs():
                 'uids': [],
                 'sigs': [],
             }
-            pubkeys.append(cur_pubkey)
+            if key_id not in ignore_keys:
+                pubkeys.append(cur_pubkey)
             cur_uid = None
         elif record == 'uid':
             cur_uid = {
@@ -71,7 +77,10 @@ def list_sigs():
         elif record == 'sig':
             if user_id == '[User ID not found]':
                 user_id = None
-            if cur_uid is None:
+            if key_id in ignore_keys:
+                # Ignore it
+                pass
+            elif cur_uid is None:
                 cur_pubkey['sigs'].append({
                     'key_id': key_id,
                     'name': user_id,
@@ -142,7 +151,7 @@ def get_strong_set(pubkeys, root, max_distance=1000):
 
     with open('scc.dot', 'w') as fp:
         fp.write('graph {\n')
-        for p in pubkeys:
+        for p in sorted(pubkeys, key=lambda p: p['key_id']):
             if p['key_id'] in strong_set:
                 name = p['uids'][0]['name']
                 fp.write('"%s" [label="%s"];\n' % (p['key_id'], name))
@@ -172,9 +181,10 @@ def main():
 
     strong_set = get_strong_set(pubkeys, root)
     unknown = get_unknown(strong_set)
-    while unknown and len(strong_set) < 100:
+    while unknown and len(strong_set) < 400:
         print("The strong set has size %d" % len(strong_set))
-        recv_keys(random.sample(unknown, min(len(unknown), 16)))
+        for i in range(0, len(unknown), 16):
+            recv_keys(unknown[i:i+16])
         pubkeys = list_sigs()
         strong_set = get_strong_set(pubkeys, root)
         unknown = get_unknown(strong_set)
