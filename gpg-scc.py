@@ -117,7 +117,7 @@ def find_pubkey(pubkeys, key_id):
         raise ValueError("%r is not a unique public key" % (key_id,))
 
 
-def get_strong_set(pubkeys, root):
+def get_strong_set(pubkeys, root, max_distance=1000):
     root = root['key_id']
     edges = set()
     for pubkey in pubkeys:
@@ -133,12 +133,24 @@ def get_strong_set(pubkeys, root):
     strong_set = set([root])
     frontier = edge_lists[root] - strong_set
     distance = 0
-    while frontier:
+    while frontier and distance < max_distance:
         next_frontier = set.union(*[edge_lists[u] for u in frontier])
         distance += 1
         strong_set |= frontier
         frontier = next_frontier - strong_set
         print("dist=%d n=%d" % (distance, len(strong_set)))
+
+    with open('scc.dot', 'w') as fp:
+        fp.write('graph {\n')
+        for p in pubkeys:
+            if p['key_id'] in strong_set:
+                name = p['uids'][0]['name']
+                fp.write('"%s" [label="%s"];\n' % (p['key_id'], name))
+                for e in edge_lists[p['key_id']]:
+                    if e in strong_set and e < p['key_id']:
+                        fp.write('"%s" -- "%s";\n' % (e, p['key_id']))
+        fp.write('}\n')
+
     return [p for p in pubkeys if p['key_id'] in strong_set]
 
 
@@ -160,7 +172,7 @@ def main():
 
     strong_set = get_strong_set(pubkeys, root)
     unknown = get_unknown(strong_set)
-    while unknown and len(strong_set) < 400:
+    while unknown and len(strong_set) < 100:
         print("The strong set has size %d" % len(strong_set))
         recv_keys(random.sample(unknown, min(len(unknown), 16)))
         pubkeys = list_sigs()
